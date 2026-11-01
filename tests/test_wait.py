@@ -5,9 +5,10 @@ import requests
 from pytest import approx
 from pytest import mark
 from pytest import raises
-from pytest_httpserver import HTTPServer
 from werkzeug import Request
 from werkzeug import Response
+
+from pytest_httpserver import HTTPServer
 
 
 def test_wait_success(httpserver: HTTPServer):
