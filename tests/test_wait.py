@@ -1,8 +1,13 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+
 import requests
 from pytest import approx
+from pytest import mark
 from pytest import raises
-
 from pytest_httpserver import HTTPServer
+from werkzeug import Request
+from werkzeug import Response
 
 
 def test_wait_success(httpserver: HTTPServer):
@@ -70,3 +75,59 @@ def test_wait_raise_assertion_false(httpserver: HTTPServer):
     assert not waiting.result
     waiting_time_error = 0.1
     assert waiting.elapsed_time == approx(waiting_timeout, abs=waiting_time_error)
+
+
+@mark.parametrize("ordered", [False, True])
+def test_wait_does_not_finish_while_last_handler_is_running(*, ordered: bool):
+    server = HTTPServer()
+    entered = Event()
+    release = Event()
+
+    def respond(_request: Request) -> Response:
+        entered.set()
+        assert release.wait(5)
+        return Response("finished")
+
+    handler = server.expect_ordered_request("/") if ordered else server.expect_oneshot_request("/")
+    handler.respond_with_handler(respond)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        try:
+            with server.wait(timeout=0.01, raise_assertions=False) as waiting:
+                future = executor.submit(server.dispatch, Request.from_values(path="/"))
+                assert entered.wait(5)
+            assert not waiting.result
+        finally:
+            release.set()
+        assert future.result(timeout=5).data == b"finished"
+
+
+@mark.parametrize("ordered", [False, True])
+def test_wait_tracks_other_callbacks_after_handler_lists_are_empty(*, ordered: bool):
+    server = HTTPServer(threaded=True)
+    entered = [Event(), Event()]
+    release = [Event(), Event()]
+
+    def respond(request: Request) -> Response:
+        index = int(request.path[1:])
+        entered[index].set()
+        assert release[index].wait(5)
+        return Response("finished")
+
+    for index in range(2):
+        handler = server.expect_ordered_request(f"/{index}") if ordered else server.expect_oneshot_request(f"/{index}")
+        handler.respond_with_handler(respond)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        try:
+            with server.wait(timeout=0.01, raise_assertions=False) as waiting:
+                first = executor.submit(server.dispatch, Request.from_values(path="/0"))
+                assert entered[0].wait(5)
+                second = executor.submit(server.dispatch, Request.from_values(path="/1"))
+                assert entered[1].wait(5)
+                release[1].set()
+                assert second.result(timeout=5).data == b"finished"
+            assert not waiting.result
+        finally:
+            release[0].set()
+            release[1].set()
+        assert first.result(timeout=5).data == b"finished"
